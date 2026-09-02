@@ -1,27 +1,28 @@
 {
-  "_note": "Configuration utilisee par GitHub Actions. Elle differe de config.json sur un seul point : l'adaptateur est Coinbase, parce que Binance refuse les IP americaines (451) et que les runners GitHub sont aux Etats-Unis. Garde les autres parametres identiques a config.json, sinon ton forward test ne teste pas la meme strategie que tes backtests.",
+  "_note": "Forex EUR/USD depuis HistData (Generic ASCII M1, gratuit, depuis 2000). Decompresse tes fichiers dans data/histdata_eurusd/ : csv_path peut designer un DOSSIER, tous les fichiers sont fusionnes, et le M1 est agrege en H1 automatiquement. csv_tz_offset_hours = -5 parce que HistData horodate en EST sans heure d'ete. Couts calibres sur OANDA TMS : commission nulle sur les devises, spread ~1 pip, swap long EUR/USD -2,41 %/an.",
   "market": {
-    "adapter": "coinbase",
-    "symbol": "BTC-USD",
+    "adapter": "csv",
+    "symbol": "EURUSD",
     "timeframe": "1h",
-    "history_days": 730,
+    "history_days": 9000,
     "cache_dir": "data",
-    "csv_path": null,
+    "csv_path": "data/histdata_eurusd",
     "synthetic_seed": 42,
-    "synthetic_bars": 8000
+    "synthetic_bars": 8000,
+    "csv_tz_offset_hours": -5.0
   },
   "portfolio": {
     "initial_cash": 10000.0,
-    "fee_rate": 0.001,
-    "slippage_bps": 5.0,
-    "swap_annual_pct": 0.0
+    "fee_rate": 0.0,
+    "slippage_bps": 1.0,
+    "swap_annual_pct": 0.0241
   },
   "strategy": {
     "ema_fast": 12,
     "ema_slow": 26,
     "atr_period": 14,
-    "min_atr_pct": 0.004,
-    "max_atr_pct": 0.08,
+    "min_atr_pct": 0.0004,
+    "max_atr_pct": 0.02,
     "exit_on_cross": true
   },
   "risk": {
@@ -41,9 +42,9 @@
     "cap_r": 3.0
   },
   "backtest": {
-    "train_ratio": 0.6,
-    "validation_ratio": 0.2,
-    "holdout_ratio": 0.2
+    "train_ratio": 0.8,
+    "validation_ratio": 0.15,
+    "holdout_ratio": 0.05
   },
   "report": {
     "output_dir": "reports",

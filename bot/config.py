@@ -17,12 +17,16 @@ ROOT = Path(__file__).resolve().parent.parent
 
 @dataclass
 class MarketConfig:
-    adapter: str = "binance"          # binance | coinbase | csv | synthetic
+    adapter: str = "binance"          # binance | coinbase | oanda | csv | synthetic
+    oanda_env: str = "practice"       # practice (fonds fictifs) | live
     symbol: str = "BTCUSDT"
     timeframe: str = "1h"
     history_days: int = 730
     cache_dir: str = "data"
     csv_path: Optional[str] = None
+    # Decalage horaire de la SOURCE par rapport a UTC. HistData horodate
+    # en EST sans heure d'ete, donc -5 toute l'annee.
+    csv_tz_offset_hours: float = 0.0
     synthetic_seed: int = 42
     synthetic_bars: int = 8000
 
@@ -32,6 +36,13 @@ class PortfolioConfig:
     initial_cash: float = 10000.0
     fee_rate: float = 0.001           # 0.1 % par cote, applique a l'achat ET a la vente
     slippage_bps: float = 5.0         # points de base de degradation du prix d'execution
+    # Cout de portage d'une position longue, en % par an (points de swap).
+    # Nul en crypto au comptant : on detient l'actif, personne ne facture la nuit.
+    # Non nul sur CFD et forex : une position longue EUR/USD coute environ
+    # 2,4 %/an chez OANDA TMS. C'est un cout PROPORTIONNEL A LA DUREE, alors
+    # que le spread est un cout fixe par aller-retour — les deux ne poussent
+    # donc pas dans le meme sens quand on choisit un horizon.
+    swap_annual_pct: float = 0.0
 
 
 @dataclass
@@ -117,8 +128,22 @@ _SECTIONS = {
 
 
 def load_config(path: Optional[str] = None) -> Config:
-    """Charge config.json ; toute cle absente reprend sa valeur par defaut."""
+    """Charge config.json ; toute cle absente reprend sa valeur par defaut.
+
+    Un chemin EXPLICITE qui n'existe pas est une erreur, jamais un repli
+    silencieux sur les valeurs par defaut : sinon une faute de frappe dans
+    --config fait tourner une tout autre configuration que celle demandee,
+    et on analyse des resultats en croyant qu'ils repondent a la question
+    posee. C'est exactement le genre de bug qui ne se voit pas.
+    """
     cfg_path = Path(path) if path else ROOT / "config.json"
+    if path and not cfg_path.exists():
+        raise ValueError(
+            f"Fichier de configuration introuvable : {cfg_path}\n"
+            "Verifie le chemin. Le bot refuse de continuer avec les valeurs "
+            "par defaut : tu croirais analyser une configuration alors que tu "
+            "en analyserais une autre."
+        )
     raw: Dict[str, Any] = {}
     if cfg_path.exists():
         raw = json.loads(cfg_path.read_text(encoding="utf-8"))
@@ -130,7 +155,8 @@ def load_config(path: Optional[str] = None) -> Config:
         unknown = set(data) - set(known)
         if unknown:
             raise ValueError(
-                f"config.json : cles inconnues dans la section '{name}' : {sorted(unknown)}"
+                f"{cfg_path.name} : cles inconnues dans la section '{name}' : "
+                f"{sorted(unknown)}"
             )
         sections[name] = klass(**known)
 
@@ -143,8 +169,22 @@ def validate(cfg: Config) -> None:
     """Garde-fous : mieux vaut planter au demarrage qu'apres 2 ans de backtest."""
     errors = []
 
-    if cfg.market.adapter not in ("binance", "coinbase", "csv", "synthetic"):
+    if cfg.market.adapter not in ("binance", "coinbase", "oanda", "csv", "synthetic"):
         errors.append(f"market.adapter inconnu : {cfg.market.adapter}")
+    if cfg.market.adapter == "oanda":
+        if "_" not in cfg.market.symbol:
+            errors.append(
+                f"OANDA attend un instrument de la forme 'EUR_USD' "
+                f"(recu : {cfg.market.symbol})"
+            )
+        if cfg.market.oanda_env not in ("practice", "live"):
+            errors.append("market.oanda_env doit valoir 'practice' ou 'live'")
+        if cfg.market.oanda_env == "live":
+            errors.append(
+                "market.oanda_env='live' : ce projet est un simulateur. Reste sur "
+                "'practice'. Si tu veux vraiment lire les donnees du compte reel, "
+                "modifie cette verification en connaissance de cause."
+            )
     if cfg.market.adapter == "coinbase" and "-" not in cfg.market.symbol:
         errors.append(
             f"Coinbase attend un symbole de la forme 'BTC-USD' (recu : {cfg.market.symbol})"
@@ -162,6 +202,11 @@ def validate(cfg: Config) -> None:
         errors.append("portfolio.fee_rate doit etre entre 0 et 0.1")
     if cfg.portfolio.slippage_bps < 0:
         errors.append("portfolio.slippage_bps doit etre >= 0")
+    if not -1.0 < cfg.portfolio.swap_annual_pct < 1.0:
+        errors.append(
+            "portfolio.swap_annual_pct s'exprime en fraction annuelle "
+            "(0.0241 = 2,41 %/an), pas en pourcentage"
+        )
 
     if cfg.strategy.ema_fast >= cfg.strategy.ema_slow:
         errors.append("strategy.ema_fast doit etre strictement < ema_slow")

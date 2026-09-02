@@ -4,6 +4,7 @@
     python -m bot.cli fetch              telecharge / rafraichit le cache d'historique
     python -m bot.cli tick               passage horaire : decide et journalise
     python -m bot.cli forward-status     etat du journal de forward testing
+    python -m bot.cli edge --segment train   le signal d'entree a-t-il un avantage ?
     python -m bot.cli backtest           entrainement + validation
     python -m bot.cli backtest --use-holdout   consomme le bloc de reserve (une seule fois)
     python -m bot.cli daily              execution du jour + rapport du soir
@@ -151,6 +152,214 @@ def cmd_forward_status(cfg: Config, args: argparse.Namespace) -> int:
             "  plusieurs centaines de decisions, avant que ces resultats\n"
             "  commencent a vouloir dire quelque chose."
         )
+    return 0
+
+
+MS_PAR_AN = 365.25 * 24 * 3600 * 1000
+
+
+def cout_total(cfg: Config, horizon_bougies: int, interval_ms: int) -> tuple[float, str]:
+    """Cout complet d'un trade tenu `horizon_bougies` bougies.
+
+    Deux composantes de nature differente, et c'est tout l'interet de les
+    separer :
+      - le SPREAD et les frais, payes une fois a l'aller-retour ;
+      - le SWAP, paye chaque nuit, donc proportionnel a la duree.
+
+    En crypto au comptant le second est nul et seul le premier compte : on a
+    donc interet a tenir longtemps pour amortir. Sur CFD forex c'est
+    l'inverse — tenir plus longtemps coute plus cher. Un horizon optimal en
+    crypto peut etre ruineux en forex, et cette fonction est ce qui rend la
+    difference visible.
+    """
+    aller_retour = 2 * (cfg.portfolio.fee_rate + cfg.portfolio.slippage_bps / 10_000.0)
+    duree_an = (horizon_bougies * interval_ms) / MS_PAR_AN
+    portage = cfg.portfolio.swap_annual_pct * duree_an
+    total = aller_retour + portage
+    jours = duree_an * 365.25
+    detail = (
+        f"{aller_retour:.4%} d'aller-retour"
+        + (f" + {portage:.4%} de portage sur {jours:.1f} jours" if portage else "")
+    )
+    return total, detail
+
+
+def _load_extras(cfg: Config, candles: List[Candle], args: argparse.Namespace) -> dict:
+    """Charge les donnees hors-prix (taux de financement) si possible.
+
+    Un echec n'est pas bloquant : les signaux qui en dependent sont
+    simplement ecartes de la comparaison, et le nombre de tests — donc la
+    correction statistique — s'ajuste tout seul.
+    """
+    if getattr(args, "sans_financement", False) or not candles:
+        return {}
+    from .funding import FundingError, fetch
+
+    try:
+        funding = fetch(
+            cfg.market.symbol.replace("-", ""),
+            candles[0].ts - 90 * 8 * 3600 * 1000,  # de quoi amorcer la fenetre glissante
+            candles[-1].ts,
+            str(cfg.path(cfg.market.cache_dir)),
+        )
+    except FundingError as exc:
+        print(f"Taux de financement indisponibles ({exc})", file=sys.stderr)
+        print("  -> les signaux de financement sont ecartes de cette comparaison.\n",
+              file=sys.stderr)
+        return {}
+
+    if len(funding) < 200:
+        print(f"Historique de financement trop court ({len(funding)} paiements) : "
+              "signaux de financement ecartes.\n", file=sys.stderr)
+        return {}
+    print(f"Taux de financement : {len(funding)} paiements charges.")
+    return {"funding": funding}
+
+
+def cmd_edge(cfg: Config, args: argparse.Namespace) -> int:
+    """Le signal d'entree predit-il quelque chose, oui ou non ?
+
+    A lancer AVANT de passer du temps a regler des sorties : si l'entree
+    n'a aucun avantage, aucun reglage de stop ne la sauvera.
+    """
+    from . import edge as edge_mod
+    from .backtest import split
+
+    adapter = build_adapter(cfg)
+    candles = _load_candles(cfg, adapter)
+
+    if args.segment:
+        parts = split(candles, cfg)
+        if args.segment not in parts:
+            print(f"Bloc inconnu : {args.segment}", file=sys.stderr)
+            return 1
+        if args.segment == "holdout":
+            print(
+                "Refus : le bloc de reserve ne sert pas a explorer. "
+                "Utilise 'train'.",
+                file=sys.stderr,
+            )
+            return 3
+        candles = parts[args.segment].candles
+        print(f"Bloc analyse : {args.segment}")
+
+    horizons = (
+        tuple(int(h) for h in args.horizons.split(","))
+        if args.horizons
+        else edge_mod.DEFAULT_HORIZONS
+    )
+    extras = _load_extras(cfg, candles, args)
+
+    if args.all_signals:
+        data = edge_mod.compare_signals(
+            cfg, candles, horizons=horizons, permutations=args.permutations, extras=extras
+        )
+        print()
+        print(edge_mod.format_comparison(data))
+        return 0
+
+    if args.signal:
+        from .signals import by_key
+
+        try:
+            sig = by_key(args.signal)
+        except ValueError as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
+        if args.periods:
+            if len(horizons) != 1:
+                print(
+                    "Avec --periods, precise un seul horizon : --horizons 72",
+                    file=sys.stderr,
+                )
+                return 1
+            rows = edge_mod.analyse_by_period(
+                cfg, candles, sig, horizons[0], periods=args.periods,
+                permutations=args.permutations, extras=extras,
+            )
+            cout, detail = cout_total(cfg, horizons[0], adapter.interval_ms)
+            print()
+            print(f"Cout retenu : {detail}")
+            print(edge_mod.format_periods(rows, horizons[0], sig.spec.label, cout))
+            return 0
+
+        data = edge_mod.analyse_signal(
+            cfg, candles, sig, horizons=horizons,
+            permutations=args.permutations, extras=extras,
+        )
+        print(f"\nSignal : {sig.spec.label}")
+        print(f"Hypothese : {sig.spec.hypothese}\n")
+        print(edge_mod.format_report(data))
+        return 0
+
+    data = edge_mod.analyse(cfg, candles, horizons=horizons, permutations=args.permutations)
+    print()
+    print(edge_mod.format_report(data))
+    return 0
+
+
+def cmd_pooled(cfg: Config, args: argparse.Namespace) -> int:
+    """Test d'avantage transversal sur tout l'univers de paires."""
+    from .adapters import TIMEFRAME_MS, BinanceAdapter, CoinbaseAdapter, MarketDataError
+    from .pooled import analyse_pooled, format_pooled
+    from .signals import by_key
+    from .universe import UNIVERS, align_on_common_grid
+
+    try:
+        sig = by_key(args.signal)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+
+    end_ms = int(datetime.now(tz=timezone.utc).timestamp() * 1000)
+    start_ms = end_ms - cfg.market.history_days * 86_400_000
+    cache = str(cfg.path(cfg.market.cache_dir))
+
+    series: dict = {}
+    ecartees: List[str] = []
+    print(f"Telechargement de {len(UNIVERS)} paires en {cfg.market.timeframe}...")
+    for k, sym in enumerate(UNIVERS, 1):
+        try:
+            if cfg.market.adapter == "coinbase":
+                ad = CoinbaseAdapter(sym.replace("USDT", "-USD"), cfg.market.timeframe, cache)
+            else:
+                ad = BinanceAdapter(sym, cfg.market.timeframe, cache)
+            candles = ad.get_candles(start_ms, end_ms)
+            if len(candles) < 400:
+                ecartees.append(sym)
+            else:
+                series[sym] = candles
+        except MarketDataError:
+            ecartees.append(sym)
+        if k % 10 == 0:
+            print(f"  {k}/{len(UNIVERS)} paires traitees")
+
+    if len(series) < 5:
+        print(
+            f"Seulement {len(series)} paire(s) exploitable(s) : pas de quoi faire "
+            "un test transversal.",
+            file=sys.stderr,
+        )
+        return 2
+
+    grille, alignees = align_on_common_grid(series)
+    print(f"{len(alignees)} paires alignees sur {len(grille)} dates communes.")
+    if ecartees:
+        print(f"Ecartees (historique trop court ou indisponible) : {', '.join(ecartees)}")
+    print(
+        "\nRappel : cet univers ne contient que des paires encore cotees aujourd'hui.\n"
+        "Les projets morts en sont absents, et ce sont ceux dont les cassures ont\n"
+        "le plus mal fini. Tout resultat obtenu ici est donc OPTIMISTE.\n"
+    )
+
+    res = analyse_pooled(
+        cfg, grille, alignees, type(sig), args.horizon,
+        permutations=args.permutations,
+    )
+    interval = TIMEFRAME_MS[cfg.market.timeframe]
+    cout, detail = cout_total(cfg, args.horizon, interval)
+    print(f"Cout retenu : {detail}\n")
+    print(format_pooled(res, sig.spec.label, cout, ecartees))
     return 0
 
 
@@ -330,6 +539,36 @@ def build_parser() -> argparse.ArgumentParser:
     bt.add_argument("--use-holdout", action="store_true", help="consomme le bloc de reserve (une seule fois)")
     bt.add_argument("--report", action="store_true", help="genere aussi un rapport HTML par bloc")
     bt.set_defaults(func=cmd_backtest)
+
+    ed = sub.add_parser(
+        "edge", help="le signal d'entree a-t-il un pouvoir predictif ?"
+    )
+    ed.add_argument("--segment", help="restreindre a un bloc (train, validation)")
+    ed.add_argument("--horizons", help="horizons en bougies, separes par des virgules")
+    ed.add_argument("--permutations", type=int, default=2000)
+    ed.add_argument(
+        "--all-signals", action="store_true",
+        help="tester toute la liste figee de candidats, avec correction de Bonferroni",
+    )
+    ed.add_argument("--signal", help="tester un seul candidat de la bibliotheque")
+    ed.add_argument(
+        "--sans-financement", dest="sans_financement", action="store_true",
+        help="ne pas telecharger les taux de financement",
+    )
+    ed.add_argument(
+        "--periods", type=int,
+        help="decouper en N tranches chronologiques pour tester la stabilite "
+             "de l'avantage dans le temps (exige --signal et un seul --horizons)",
+    )
+    ed.set_defaults(func=cmd_edge)
+
+    pl = sub.add_parser(
+        "pooled", help="test d'avantage transversal sur tout l'univers de paires"
+    )
+    pl.add_argument("--signal", required=True, help="candidat a tester")
+    pl.add_argument("--horizon", type=int, required=True, help="horizon en bougies")
+    pl.add_argument("--permutations", type=int, default=2000)
+    pl.set_defaults(func=cmd_pooled)
 
     sub.add_parser(
         "tick", help="passage horaire : decide et journalise, sans rapport"

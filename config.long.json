@@ -1,10 +1,10 @@
 {
-  "_note": "Configuration utilisee par GitHub Actions. Elle differe de config.json sur un seul point : l'adaptateur est Coinbase, parce que Binance refuse les IP americaines (451) et que les runners GitHub sont aux Etats-Unis. Garde les autres parametres identiques a config.json, sinon ton forward test ne teste pas la meme strategie que tes backtests.",
+  "_note": "Historique profond : ~8 ans au lieu de 2. Deux objectifs — donner assez de signaux pour que le test d'avantage ait la puissance de detecter un petit effet, et couvrir plusieurs cycles complets (2018, 2020-21, 2022, 2024-25) plutot qu'une seule ambiance de marche. Les ratios de decoupage sont ajustes pour que le bloc de RESERVE reste exactement la meme fenetre calendaire jamais examinee (les ~5 derniers mois).",
   "market": {
-    "adapter": "coinbase",
-    "symbol": "BTC-USD",
+    "adapter": "binance",
+    "symbol": "BTCUSDT",
     "timeframe": "1h",
-    "history_days": 730,
+    "history_days": 2900,
     "cache_dir": "data",
     "csv_path": null,
     "synthetic_seed": 42,
@@ -41,9 +41,9 @@
     "cap_r": 3.0
   },
   "backtest": {
-    "train_ratio": 0.6,
-    "validation_ratio": 0.2,
-    "holdout_ratio": 0.2
+    "train_ratio": 0.8,
+    "validation_ratio": 0.15,
+    "holdout_ratio": 0.05
   },
   "report": {
     "output_dir": "reports",

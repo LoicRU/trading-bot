@@ -42,6 +42,47 @@ def ema(values: Sequence[float], period: int) -> List[Optional[float]]:
     return out
 
 
+def rsi(values: Sequence[float], period: int = 14) -> List[Optional[float]]:
+    """Relative Strength Index, lissage de Wilder.
+
+    Mesure entre 0 et 100 la force relative des hausses face aux baisses.
+    Sous 30, on parle traditionnellement de survente ; au-dessus de 70,
+    de surachat. Que ces seuils aient une valeur predictive reste
+    precisement ce qu'il faut verifier plutot que croire.
+    """
+    out: List[Optional[float]] = [None] * len(values)
+    if period < 1 or len(values) <= period:
+        return out
+
+    gains = losses = 0.0
+    for i in range(1, period + 1):
+        delta = values[i] - values[i - 1]
+        gains += max(delta, 0.0)
+        losses += max(-delta, 0.0)
+    avg_gain, avg_loss = gains / period, losses / period
+    out[period] = 100.0 if avg_loss == 0 else 100.0 - 100.0 / (1 + avg_gain / avg_loss)
+
+    for i in range(period + 1, len(values)):
+        delta = values[i] - values[i - 1]
+        avg_gain = (avg_gain * (period - 1) + max(delta, 0.0)) / period
+        avg_loss = (avg_loss * (period - 1) + max(-delta, 0.0)) / period
+        out[i] = 100.0 if avg_loss == 0 else 100.0 - 100.0 / (1 + avg_gain / avg_loss)
+    return out
+
+
+def rolling_max(values: Sequence[float], window: int) -> List[Optional[float]]:
+    """Plus haut des `window` valeurs PRECEDENTES (l'indice i exclu).
+
+    L'exclusion de i est volontaire : inclure la bougie courante ferait
+    fuir le present dans le signal et rendrait tout cassage de plus haut
+    trivialement vrai.
+    """
+    out: List[Optional[float]] = [None] * len(values)
+    for i in range(window, len(values)):
+        out[i] = max(values[i - window:i])
+    return out
+
+
 def true_range(current: Candle, previous: Optional[Candle]) -> float:
     if previous is None:
         return current.high - current.low

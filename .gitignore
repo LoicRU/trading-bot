@@ -1,8 +1,8 @@
 __pycache__/
 *.pyc
-data/*.sqlite*
-data/*.csv
+data/
 reports/
 logs/
 .holdout_used.json
 KILL_SWITCH
+*:Zone.Identifier

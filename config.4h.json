@@ -1,9 +1,8 @@
 {
-  "_note": "Configuration utilisee par GitHub Actions. Elle differe de config.json sur un seul point : l'adaptateur est Coinbase, parce que Binance refuse les IP americaines (451) et que les runners GitHub sont aux Etats-Unis. Garde les autres parametres identiques a config.json, sinon ton forward test ne teste pas la meme strategie que tes backtests.",
   "market": {
-    "adapter": "coinbase",
-    "symbol": "BTC-USD",
-    "timeframe": "1h",
+    "adapter": "binance",
+    "symbol": "BTCUSDT",
+    "timeframe": "4h",
     "history_days": 730,
     "cache_dir": "data",
     "csv_path": null,
@@ -13,8 +12,7 @@
   "portfolio": {
     "initial_cash": 10000.0,
     "fee_rate": 0.001,
-    "slippage_bps": 5.0,
-    "swap_annual_pct": 0.0
+    "slippage_bps": 5.0
   },
   "strategy": {
     "ema_fast": 12,

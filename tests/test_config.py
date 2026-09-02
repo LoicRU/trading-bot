@@ -84,6 +84,20 @@ class TestConfig(unittest.TestCase):
         with self.assertRaises(ValueError):
             load_config(path)
 
+    def test_config_inexistante_est_une_erreur(self):
+        """Un --config errone doit planter, PAS retomber en silence sur les
+        valeurs par defaut : sinon on analyse une configuration en croyant
+        en analyser une autre."""
+        with self.assertRaises(ValueError):
+            load_config("/tmp/cette_config_nexiste_pas_du_tout.json")
+
+    def test_les_trois_configs_livrees_sont_valides(self):
+        root = Path(__file__).resolve().parent.parent
+        for name in ("config.json", "config.ci.json", "config.long.json"):
+            chemin = root / name
+            if chemin.exists():
+                load_config(str(chemin))
+
     def test_valeurs_par_defaut_si_cle_absente(self):
         path = write_cfg({"strategy": {"ema_fast": 5}})
         cfg = load_config(path)

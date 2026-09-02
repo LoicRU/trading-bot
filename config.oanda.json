@@ -1,0 +1,58 @@
+{
+  "_note": "Forex via OANDA TMS Brokers (CFD, plateforme MT5). Jeton dans OANDA_TOKEN, jamais ici. Couts calibres sur les documents officiels du 07/08/2026 : commission 0 EUR sur les devises pour un compte en EUR ; spread flottant, environ 1 pip sur EUR/USD, soit ~0,5 bp de demi-spread de chaque cote (je retiens 1,0 bp, volontairement conservateur, et un compte sous 3 000 EUR subit une majoration supplementaire de 0,2 pip) ; points de swap EUR/USD long -2,41 %/an, d'ou swap_annual_pct 0.0241. Le swap est un cout PAR JOUR : sur un horizon de 3 jours il pese autant que le spread, et il devient dominant au-dela.",
+  "market": {
+    "adapter": "oanda",
+    "symbol": "EUR_USD",
+    "timeframe": "1h",
+    "history_days": 2900,
+    "cache_dir": "data",
+    "csv_path": null,
+    "oanda_env": "practice",
+    "synthetic_seed": 42,
+    "synthetic_bars": 8000
+  },
+  "portfolio": {
+    "initial_cash": 10000.0,
+    "fee_rate": 0.0,
+    "slippage_bps": 1.0,
+    "swap_annual_pct": 0.0241
+  },
+  "strategy": {
+    "ema_fast": 12,
+    "ema_slow": 26,
+    "atr_period": 14,
+    "min_atr_pct": 0.0004,
+    "max_atr_pct": 0.02,
+    "exit_on_cross": true
+  },
+  "risk": {
+    "risk_per_trade_pct": 0.01,
+    "max_position_pct": 0.25,
+    "atr_stop_mult": 2.0,
+    "atr_tp_mult": 3.0,
+    "max_daily_loss_pct": 0.03,
+    "max_open_positions": 1
+  },
+  "scoring": {
+    "horizon_bars": 24,
+    "opportunity_threshold_r": 1.0,
+    "opportunity_weight": 0.5,
+    "avoided_weight": 0.3,
+    "patience_reward": 0.05,
+    "cap_r": 3.0
+  },
+  "backtest": {
+    "train_ratio": 0.8,
+    "validation_ratio": 0.15,
+    "holdout_ratio": 0.05
+  },
+  "report": {
+    "output_dir": "reports",
+    "timezone_offset_hours": 2
+  },
+  "runtime": {
+    "db_path": "data/bot.sqlite",
+    "kill_switch_file": "KILL_SWITCH",
+    "forward_log": "forward_log.jsonl"
+  }
+}
