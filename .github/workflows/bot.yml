@@ -1,0 +1,123 @@
+name: Bot de trading (portefeuille fictif)
+
+# Deux rythmes :
+#   - toutes les heures : le bot decide et journalise (forward testing)
+#   - a 20h05 UTC (22h05 Paris, cloture de la session de New York) : rapport du soir
+#
+# Aucun secret n'est necessaire pour faire tourner le bot : il n'utilise que
+# des donnees de marche publiques et ne passe aucun ordre reel.
+
+on:
+  schedule:
+    - cron: "5 * * * *"     # toutes les heures a HH:05, une fois la bougie close
+    - cron: "5 20 * * *"    # rapport du soir (20h05 UTC = 22h05 Paris en ete)
+  workflow_dispatch:         # bouton "Run workflow" pour declencher a la main
+    inputs:
+      force_report:
+        description: "Generer le rapport meme hors de l'horaire du soir"
+        type: boolean
+        default: false
+
+# Une seule execution a la fois : deux passages simultanes pourraient
+# ecrire dans le journal en meme temps.
+concurrency:
+  group: trading-bot
+  cancel-in-progress: false
+
+permissions:
+  contents: write   # necessaire pour commiter le journal de forward testing
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    env:
+      # config.ci.json utilise l'adaptateur Coinbase : Binance renvoie une
+      # erreur 451 depuis les IP americaines, et les runners GitHub le sont.
+      BOT_CONFIG: config.ci.json
+      # Vide si le secret n'existe pas : l'etape Netlify se saute alors seule.
+      NETLIFY_AUTH_TOKEN: ${{ secrets.NETLIFY_AUTH_TOKEN }}
+      NETLIFY_SITE_ID: ${{ secrets.NETLIFY_SITE_ID }}
+
+    steps:
+      - name: Recuperer le depot
+        uses: actions/checkout@v4
+
+      - name: Installer Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+        # Aucune dependance a installer : le bot n'utilise que la
+        # bibliotheque standard.
+
+      - name: Restaurer le cache des donnees de marche
+        uses: actions/cache@v4
+        with:
+          path: data
+          key: market-data-${{ github.run_id }}
+          restore-keys: |
+            market-data-
+
+      - name: Verifier la configuration
+        run: python -m bot.cli --config "$BOT_CONFIG" check
+
+      - name: Decider et journaliser
+        run: python -m bot.cli --config "$BOT_CONFIG" tick
+
+      - name: Determiner s'il faut produire le rapport
+        id: mode
+        run: |
+          if [ "${{ github.event.schedule }}" = "5 20 * * *" ] || \
+             [ "${{ inputs.force_report }}" = "true" ]; then
+            echo "report=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "report=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Rapport du soir
+        if: steps.mode.outputs.report == 'true'
+        run: python -m bot.cli --config "$BOT_CONFIG" daily
+
+      - name: Etat du forward testing
+        run: python -m bot.cli --config "$BOT_CONFIG" forward-status
+
+      # Le journal est commite : l'historique git date chaque decision de
+      # facon independante du bot lui-meme. C'est ce qui rend le forward
+      # test verifiable plutot que declaratif.
+      - name: Commiter le journal
+        run: |
+          if [ -n "$(git status --porcelain forward_log.jsonl)" ]; then
+            git config user.name "trading-bot"
+            git config user.email "bot@users.noreply.github.com"
+            git add forward_log.jsonl
+            git commit -m "journal: $(date -u '+%Y-%m-%d %H:%M UTC')"
+            git pull --rebase --autostash origin "${GITHUB_REF_NAME}" || true
+            git push
+          else
+            echo "Rien de nouveau a journaliser."
+          fi
+
+      - name: Publier le rapport en artefact
+        if: steps.mode.outputs.report == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: rapport-du-soir
+          path: reports/
+          retention-days: 90
+
+      # --- Optionnel : publication sur Netlify -------------------------
+      # Pour activer : cree un site Netlify vide, puis ajoute deux secrets
+      # dans Settings > Secrets and variables > Actions :
+      #   NETLIFY_AUTH_TOKEN  (Netlify > User settings > Applications)
+      #   NETLIFY_SITE_ID     (Site settings > General > Site ID)
+      # Sans ces secrets, l'etape est simplement sautee.
+      - name: Publier le rapport sur Netlify
+        if: steps.mode.outputs.report == 'true' && env.NETLIFY_AUTH_TOKEN != ''
+        run: |
+          cp "$(ls -t reports/rapport_*.html | head -1)" reports/index.html
+          npx --yes netlify-cli@latest deploy \
+            --dir=reports --prod \
+            --site "$NETLIFY_SITE_ID" \
+            --auth "$NETLIFY_AUTH_TOKEN" \
+            --message "rapport du $(date -u '+%Y-%m-%d')"

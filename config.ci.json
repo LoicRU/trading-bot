@@ -1,0 +1,56 @@
+{
+  "_note": "Configuration utilisee par GitHub Actions. Elle differe de config.json sur un seul point : l'adaptateur est Coinbase, parce que Binance refuse les IP americaines (451) et que les runners GitHub sont aux Etats-Unis. Garde les autres parametres identiques a config.json, sinon ton forward test ne teste pas la meme strategie que tes backtests.",
+  "market": {
+    "adapter": "coinbase",
+    "symbol": "BTC-USD",
+    "timeframe": "1h",
+    "history_days": 730,
+    "cache_dir": "data",
+    "csv_path": null,
+    "synthetic_seed": 42,
+    "synthetic_bars": 8000
+  },
+  "portfolio": {
+    "initial_cash": 10000.0,
+    "fee_rate": 0.001,
+    "slippage_bps": 5.0
+  },
+  "strategy": {
+    "ema_fast": 12,
+    "ema_slow": 26,
+    "atr_period": 14,
+    "min_atr_pct": 0.004,
+    "max_atr_pct": 0.08,
+    "exit_on_cross": true
+  },
+  "risk": {
+    "risk_per_trade_pct": 0.01,
+    "max_position_pct": 0.25,
+    "atr_stop_mult": 2.0,
+    "atr_tp_mult": 3.0,
+    "max_daily_loss_pct": 0.03,
+    "max_open_positions": 1
+  },
+  "scoring": {
+    "horizon_bars": 24,
+    "opportunity_threshold_r": 1.0,
+    "opportunity_weight": 0.5,
+    "avoided_weight": 0.3,
+    "patience_reward": 0.05,
+    "cap_r": 3.0
+  },
+  "backtest": {
+    "train_ratio": 0.6,
+    "validation_ratio": 0.2,
+    "holdout_ratio": 0.2
+  },
+  "report": {
+    "output_dir": "reports",
+    "timezone_offset_hours": 2
+  },
+  "runtime": {
+    "db_path": "data/bot.sqlite",
+    "kill_switch_file": "KILL_SWITCH",
+    "forward_log": "forward_log.jsonl"
+  }
+}
