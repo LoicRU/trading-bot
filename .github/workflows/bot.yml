@@ -116,7 +116,11 @@ jobs:
         if: steps.mode.outputs.report == 'true' && env.NETLIFY_AUTH_TOKEN != ''
         run: |
           cp "$(ls -t reports/rapport_*.html | head -1)" reports/index.html
+          # --no-build est indispensable : sans lui, la CLI execute la commande
+          # de build configuree dans l'interface Netlify (qui n'a rien a voir
+          # avec ce projet) au lieu de se contenter d'envoyer le HTML deja pret.
           npx --yes netlify-cli@latest deploy \
+            --no-build \
             --dir=reports --prod \
             --site "$NETLIFY_SITE_ID" \
             --auth "$NETLIFY_AUTH_TOKEN" \
