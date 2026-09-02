@@ -39,6 +39,9 @@ jobs:
       # Vide si le secret n'existe pas : l'etape Netlify se saute alors seule.
       NETLIFY_AUTH_TOKEN: ${{ secrets.NETLIFY_AUTH_TOKEN }}
       NETLIFY_SITE_ID: ${{ secrets.NETLIFY_SITE_ID }}
+      # Notification telephone. Vide si le secret n'existe pas : les etapes
+      # de notification se sautent alors toutes seules.
+      NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
 
     steps:
       - name: Recuperer le depot
@@ -77,10 +80,33 @@ jobs:
 
       - name: Rapport du soir
         if: steps.mode.outputs.report == 'true'
-        run: python -m bot.cli --config "$BOT_CONFIG" daily
+        run: python -m bot.cli --config "$BOT_CONFIG" daily | tee sortie_daily.txt
 
       - name: Etat du forward testing
-        run: python -m bot.cli --config "$BOT_CONFIG" forward-status
+        run: python -m bot.cli --config "$BOT_CONFIG" forward-status | tee sortie_forward.txt
+
+      # --- Notifications telephone (ntfy.sh) --------------------------
+      # Volontairement PAS a chaque passage horaire : 24 notifications par
+      # jour deviennent du bruit qu'on finit par couper, et on rate alors
+      # celles qui comptaient. On notifie ce qui porte une information :
+      # le bilan du soir, une divergence, un echec.
+      - name: Notifier le bilan du soir
+        if: steps.mode.outputs.report == 'true' && env.NTFY_TOPIC != ''
+        run: |
+          RESUME=$(grep -E "capital|marche|trades|score  |journee" sortie_daily.txt | head -6)
+          curl -sS -H "Title: Bilan du $(date -u '+%d/%m')" \
+               -H "Tags: bar_chart" \
+               -d "$RESUME" "https://ntfy.sh/$NTFY_TOPIC" > /dev/null
+
+      - name: Alerter en cas de divergence
+        if: env.NTFY_TOPIC != ''
+        run: |
+          if grep -q "DIVERGENCES DETECTEES" sortie_forward.txt; then
+            curl -sS -H "Title: Forward test rompu" -H "Priority: high" \
+                 -H "Tags: warning" \
+                 -d "Des decisions deja journalisees ont change. Un parametre a bouge : le compteur de forward testing repart de zero." \
+                 "https://ntfy.sh/$NTFY_TOPIC" > /dev/null
+          fi
 
       # Le journal est commite : l'historique git date chaque decision de
       # facon independante du bot lui-meme. C'est ce qui rend le forward
@@ -125,3 +151,11 @@ jobs:
             --site "$NETLIFY_SITE_ID" \
             --auth "$NETLIFY_AUTH_TOKEN" \
             --message "rapport du $(date -u '+%Y-%m-%d')"
+
+      - name: Alerter en cas d'echec
+        if: failure() && env.NTFY_TOPIC != ''
+        run: |
+          curl -sS -H "Title: Le bot a echoue" -H "Priority: high" \
+               -H "Tags: rotating_light" \
+               -d "Passage du $(date -u '+%d/%m a %H:%M') UTC en echec. Les logs sont dans l'onglet Actions." \
+               "https://ntfy.sh/$NTFY_TOPIC" > /dev/null
