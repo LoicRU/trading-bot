@@ -80,7 +80,11 @@ jobs:
 
       - name: Rapport du soir
         if: steps.mode.outputs.report == 'true'
-        run: python -m bot.cli --config "$BOT_CONFIG" daily | tee sortie_daily.txt
+        run: |
+          python -m bot.cli --config "$BOT_CONFIG" daily | tee sortie_daily.txt
+          # Page separee : ce que le forward test EN DIRECT a reellement
+          # gagne ou perdu (jamais le backtest rejoue par 'daily' ci-dessus).
+          python -m bot.cli --config "$BOT_CONFIG" forward-report
 
       - name: Etat du forward testing
         run: python -m bot.cli --config "$BOT_CONFIG" forward-status | tee sortie_forward.txt
