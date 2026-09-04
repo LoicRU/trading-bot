@@ -16,6 +16,7 @@ from bot.adapters.csv_file import (
     agreger_flux,
     est_export_mt5,
     est_histdata,
+    est_mt_csv,
     lignes_du_fichier,
 )
 
@@ -40,6 +41,14 @@ def histdata(date, heure, o, h, l, c):
     return f"{date} {heure};{o};{h};{l};{c};0"
 
 
+def mt_csv(date, heure, o, h, l, c, vol=0):
+    """Format HistData « Data files: MetaTrader » reellement telecharge par
+    l'utilisateur : 2024.01.01,17:00,1.104270,1.104290,1.104250,1.104290,0
+    (a ne pas confondre avec l'export du terminal MT5, format 'mt5' ci-dessus :
+    pas d'en-tete, pas de tabulations, pas de secondes)."""
+    return f"{date},{heure},{o},{h},{l},{c},{vol}"
+
+
 class TestDetection(unittest.TestCase):
     def test_reconnait_mt5(self):
         self.assertTrue(est_export_mt5(ENTETE_MT5))
@@ -51,6 +60,16 @@ class TestDetection(unittest.TestCase):
         self.assertFalse(est_histdata(ENTETE_MT5))
         self.assertFalse(est_export_mt5("20240102 000000;1.1;1.2;1.0;1.15;0"))
         self.assertFalse(est_histdata("ts,open,high,low,close,volume"))
+
+    def test_reconnait_mt_csv(self):
+        self.assertTrue(est_mt_csv("2024.01.01,17:00,1.104270,1.104290,1.104250,1.104290,0"))
+
+    def test_mt_csv_ne_se_confond_pas_avec_les_autres_formats(self):
+        ligne = "2024.01.01,17:00,1.104270,1.104290,1.104250,1.104290,0"
+        self.assertFalse(est_export_mt5(ligne))
+        self.assertFalse(est_histdata(ligne))
+        self.assertFalse(est_mt_csv(ENTETE_MT5))
+        self.assertFalse(est_mt_csv("20240102 000000;1.1;1.2;1.0;1.15;0"))
 
 
 class TestLecture(unittest.TestCase):
@@ -84,6 +103,21 @@ class TestLecture(unittest.TestCase):
         ])
         self.assertEqual(len(list(lignes_du_fichier(Path(chemin)))), 2)
 
+    def test_mt_csv_lignes_reelles(self):
+        """Valeurs telles que reellement livrees par HistData (format
+        'Data files: MetaTrader'), pas une reconstruction approximative."""
+        chemin = ecrire([
+            mt_csv("2024.01.01", "17:00", 1.104270, 1.104290, 1.104250, 1.104290, 0),
+            mt_csv("2024.01.01", "17:01", 1.104290, 1.104290, 1.104290, 1.104290, 5),
+        ])
+        out = list(lignes_du_fichier(Path(chemin)))
+        self.assertEqual(len(out), 2)
+        self.assertAlmostEqual(out[0][1], 1.104270)
+        self.assertAlmostEqual(out[0][4], 1.104290)
+        self.assertEqual(out[1][5], 5.0)
+        dt = datetime.fromtimestamp(out[0][0] / 1000, tz=timezone.utc)
+        self.assertEqual(dt.strftime("%Y-%m-%d %H:%M"), "2024-01-01 17:00")
+
 
 class TestDecalageHoraire(unittest.TestCase):
     def test_histdata_est_recale_en_utc(self):
@@ -103,6 +137,16 @@ class TestDecalageHoraire(unittest.TestCase):
         ])
         ad = CsvAdapter("EURUSD", "1h", chemin)
         self.assertEqual(ad.get_candles()[0].dt.strftime("%H:%M"), "00:00")
+
+    def test_mt_csv_est_recale_en_utc(self):
+        """Meme convention EST-sans-heure-d'ete que le format Generic ASCII,
+        confirme par la documentation HistData (memes termes pour les deux
+        formats)."""
+        chemin = ecrire([
+            mt_csv("2024.01.02", f"{h:02d}:00", 1.1, 1.2, 1.0, 1.15) for h in range(6)
+        ])
+        ad = CsvAdapter("EURUSD", "1h", chemin, tz_offset_hours=-5.0)
+        self.assertEqual(ad.get_candles()[0].dt.strftime("%H:%M"), "05:00")
 
 
 class TestAgregation(unittest.TestCase):
@@ -180,6 +224,22 @@ class TestAdaptateur(unittest.TestCase):
         with self.assertRaises(MarketDataError):
             ad.get_candles()
 
+    def test_dossier_de_fichiers_annuels_mt_csv_fusionne(self):
+        """HistData livre le format MetaTrader par ANNEE (pas par mois comme
+        le Generic ASCII) : un fichier par annee doit se fusionner pareil."""
+        dossier = Path(tempfile.mkdtemp())
+        for annee, jour in (("2023", "20230103"), ("2024", "20240102")):
+            lignes = [
+                mt_csv(f"{jour[:4]}.{jour[4:6]}.{jour[6:]}", f"{h:02d}:{m:02d}", 1.1, 1.2, 1.0, 1.15)
+                for h in range(2) for m in (0, 30)
+            ]
+            (dossier / f"DAT_MT_EURUSD_M1_{annee}.csv").write_text(
+                "\n".join(lignes) + "\n", encoding="utf-8"
+            )
+        ad = CsvAdapter("EURUSD", "1h", str(dossier))
+        self.assertEqual(len(ad.get_candles()), 4)  # 2 heures x 2 annees
+        self.assertIn("2 fichiers", ad.describe())
+
     def test_format_simple_toujours_supporte(self):
         f = tempfile.NamedTemporaryFile("w", suffix=".csv", delete=False, encoding="utf-8")
         f.write("ts,open,high,low,close,volume\n")
@@ -216,6 +276,20 @@ class TestPerformanceEtRobustesse(unittest.TestCase):
                 .replace(tzinfo=timezone.utc).timestamp() * 1000
             )
             self.assertEqual(_parse_histdata_datetime(dt, tt), attendu)
+
+    def test_mt_csv_calcul_de_date_identique_a_strptime(self):
+        import random
+        from datetime import datetime, timezone
+        from bot.adapters.csv_file import _parse_mt_csv_datetime
+
+        rng = random.Random(1)
+        for _ in range(500):
+            y, mo, d = rng.randint(2000, 2026), rng.randint(1, 12), rng.randint(1, 28)
+            h, mi = rng.randint(0, 23), rng.randint(0, 59)
+            attendu = int(
+                datetime(y, mo, d, h, mi, tzinfo=timezone.utc).timestamp() * 1000
+            )
+            self.assertEqual(_parse_mt_csv_datetime(y, mo, d, h, mi), attendu)
 
     def test_annees_bissextiles(self):
         from datetime import datetime, timezone

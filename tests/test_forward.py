@@ -109,6 +109,63 @@ class TestForwardLog(unittest.TestCase):
         self.assertFalse(self.log.exists())
         self.assertIsNone(self.log.last_decision_ts())
 
+    def test_pnl_total_cumule_les_trades_en_direct(self):
+        self.log.append_new(result_with([decision(1000)]), "X", "1h")
+        self.log.append_new(
+            result_with([decision(1000), decision(2000), decision(3000)],
+                        [trade(2000, pnl=10.0), trade(3000, pnl=-4.0)]),
+            "X", "1h",
+        )
+        s = self.log.stats()
+        self.assertAlmostEqual(s["pnl_total"], 6.0)
+        self.assertEqual(s["trades_gagnants"], 1)
+        self.assertEqual(s["trades_perdants"], 1)
+
+    def test_since_ts_restreint_aux_decisions_et_trades_apres_ce_moment(self):
+        self.log.append_new(result_with([decision(1000)]), "X", "1h")
+        self.log.append_new(
+            result_with(
+                [decision(1000), decision(2000), decision(3000), decision(4000)],
+                [trade(2000, pnl=10.0), trade(4000, pnl=-4.0)],
+            ),
+            "X", "1h",
+        )
+        # Sans filtre : tout ce qui est en direct.
+        self.assertEqual(self.log.stats()["decisions_live"], 3)
+        self.assertEqual(self.log.stats()["trades_live"], 2)
+        self.assertAlmostEqual(self.log.stats()["pnl_total"], 6.0)
+
+        # Avec since_ts=3000 : seules les lignes a partir de 3000 comptent.
+        s = self.log.stats(since_ts=3000)
+        self.assertEqual(s["decisions_live"], 2)  # ts 3000 et 4000
+        self.assertEqual(s["trades_live"], 1)      # exit_ts 4000 seulement
+        self.assertAlmostEqual(s["pnl_total"], -4.0)
+
+        # since_ts au-dela de tout : fenetre vide, pas d'erreur.
+        s_vide = self.log.stats(since_ts=10_000)
+        self.assertEqual(s_vide["decisions_live"], 0)
+        self.assertEqual(s_vide["trades_live"], 0)
+        self.assertAlmostEqual(s_vide["pnl_total"], 0.0)
+
+    def test_live_trades_et_live_decisions_sont_tries_et_filtres(self):
+        self.log.append_new(result_with([decision(1000)]), "X", "1h")
+        self.log.append_new(
+            result_with(
+                [decision(1000), decision(3000), decision(2000)],
+                [trade(4000, pnl=1.0), trade(3000, pnl=2.0)],
+            ),
+            "X", "1h",
+        )
+        decs = self.log.live_decisions()
+        self.assertEqual([d["ts"] for d in decs], [2000, 3000])
+        trades = self.log.live_trades()
+        self.assertEqual([t["exit_ts"] for t in trades], [3000, 4000])
+
+        decs_filtres = self.log.live_decisions(since_ts=3000)
+        self.assertEqual([d["ts"] for d in decs_filtres], [3000])
+        trades_filtres = self.log.live_trades(since_ts=3500)
+        self.assertEqual([t["exit_ts"] for t in trades_filtres], [4000])
+
 
 if __name__ == "__main__":
     unittest.main()

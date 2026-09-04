@@ -4,7 +4,11 @@
     python -m bot.cli fetch              telecharge / rafraichit le cache d'historique
     python -m bot.cli tick               passage horaire : decide et journalise
     python -m bot.cli forward-status     etat du journal de forward testing
+    python -m bot.cli forward-status --since 2026-09-03   idem, restreint a une fenetre
+    python -m bot.cli forward-report [--since ...]   page HTML : P&L reellement realise en direct
     python -m bot.cli edge --segment train   le signal d'entree a-t-il un avantage ?
+    python -m bot.cli explore                depistage de 40 signaux exploratoires (train uniquement)
+    python -m bot.cli edge --signal <cle> --explo --segment validation   confirmation d'un candidat
     python -m bot.cli backtest           entrainement + validation
     python -m bot.cli backtest --use-holdout   consomme le bloc de reserve (une seule fois)
     python -m bot.cli daily              execution du jour + rapport du soir
@@ -132,26 +136,93 @@ def cmd_tick(cfg: Config, args: argparse.Namespace) -> int:
     return 0
 
 
+def _parse_since(valeur: str, offset_hours: float) -> int:
+    """Convertit 'AAAA-MM-JJ' ou 'AAAA-MM-JJTHH:MM' (heure locale du rapport,
+    cfg.report.timezone_offset_hours) en millisecondes depuis l'epoque.
+
+    Leve ValueError si le format ne correspond a aucun des deux.
+    """
+    fmt = "%Y-%m-%dT%H:%M" if "T" in valeur else "%Y-%m-%d"
+    dt = datetime.strptime(valeur, fmt).replace(
+        tzinfo=timezone(timedelta(hours=offset_hours))
+    )
+    return int(dt.timestamp() * 1000)
+
+
 def cmd_forward_status(cfg: Config, args: argparse.Namespace) -> int:
+    from .report import quote_currency
+
     log = ForwardLog(cfg.path(cfg.runtime.forward_log))
     if not log.exists():
         print("Aucun journal de forward testing. Il sera cree au premier 'tick'.")
         return 0
-    s = log.stats()
-    print("Journal de forward testing")
+
+    since_ts = None
+    if getattr(args, "since", None):
+        try:
+            since_ts = _parse_since(args.since, cfg.report.timezone_offset_hours)
+        except ValueError:
+            print(
+                f"Date invalide : {args.since!r} (format attendu AAAA-MM-JJ ou "
+                "AAAA-MM-JJTHH:MM)",
+                file=sys.stderr,
+            )
+            return 1
+
+    s = log.stats(since_ts=since_ts)
+    quote = quote_currency(cfg.market.symbol)
+    titre = "Journal de forward testing"
+    if since_ts is not None:
+        titre += f" (depuis {args.since})"
+    print(titre)
     print(f"  decisions enregistrees en direct : {s['decisions_live']}")
-    print(f"  trades en direct                 : {s['trades_live']}")
-    print(f"  duree du forward test            : {s['jours_de_forward']} jours")
+    if s["decisions_par_action"]:
+        detail = ", ".join(f"{k} : {v}" for k, v in sorted(s["decisions_par_action"].items()))
+        print(f"    dont                            : {detail}")
+    print(f"  trades en direct                 : {s['trades_live']}"
+          f" ({s['trades_gagnants']} gagnant(s) / {s['trades_perdants']} perdant(s))")
+    signe = "+" if s["pnl_total"] >= 0 else ""
+    print(f"  P&L cumule (trades clotures)     : {signe}{s['pnl_total']:.2f} {quote}")
+    print(f"  duree de la fenetre               : {s['jours_de_forward']} jours")
     print(f"  debut                            : {s['debut_live'] or '-'}")
     print(f"  dernier passage                  : {s['dernier_live'] or '-'}")
     if s["divergences"]:
         print(f"  DIVERGENCES DETECTEES            : {s['divergences']} (forward test rompu)")
-    if s["jours_de_forward"] < 90:
+    if since_ts is None and s["jours_de_forward"] < 90:
         print(
             "\n  Rappel : il faut au minimum 3 a 6 mois de journal continu, et\n"
             "  plusieurs centaines de decisions, avant que ces resultats\n"
             "  commencent a vouloir dire quelque chose."
         )
+    return 0
+
+
+def cmd_forward_report(cfg: Config, args: argparse.Namespace) -> int:
+    """Genere une page HTML autonome : courbe du P&L reellement realise en
+    direct (pas le backtest rejoue) plus le detail des trades du journal.
+    """
+    from .report import build_forward_report, write_report
+
+    log = ForwardLog(cfg.path(cfg.runtime.forward_log))
+    if not log.exists():
+        print("Aucun journal de forward testing. Il sera cree au premier 'tick'.", file=sys.stderr)
+        return 0
+
+    since_ts = None
+    if getattr(args, "since", None):
+        try:
+            since_ts = _parse_since(args.since, cfg.report.timezone_offset_hours)
+        except ValueError:
+            print(
+                f"Date invalide : {args.since!r} (format attendu AAAA-MM-JJ ou "
+                "AAAA-MM-JJTHH:MM)",
+                file=sys.stderr,
+            )
+            return 1
+
+    html_text = build_forward_report(cfg, log, since_ts=since_ts, since_label=args.since)
+    path = write_report(cfg, html_text, "forward_pnl.html")
+    print(f"Rapport ecrit : {path}")
     return 0
 
 
@@ -259,10 +330,15 @@ def cmd_edge(cfg: Config, args: argparse.Namespace) -> int:
         return 0
 
     if args.signal:
-        from .signals import by_key
+        from .signals import by_key as by_key_fige
+
+        if getattr(args, "explo", False):
+            from .signals_explo import by_key as lookup
+        else:
+            lookup = by_key_fige
 
         try:
-            sig = by_key(args.signal)
+            sig = lookup(args.signal)
         except ValueError as exc:
             print(str(exc), file=sys.stderr)
             return 1
@@ -295,6 +371,33 @@ def cmd_edge(cfg: Config, args: argparse.Namespace) -> int:
     data = edge_mod.analyse(cfg, candles, horizons=horizons, permutations=args.permutations)
     print()
     print(edge_mod.format_report(data))
+    return 0
+
+
+def cmd_explore(cfg: Config, args: argparse.Namespace) -> int:
+    """Etape 1 du protocole en deux temps : depistage de la bibliotheque
+    exploratoire (40 candidats issus de TA-Lib/pandas-ta/WorldQuant, voir
+    bot/signals_explo.py et catalogue_signaux.md) sur le bloc TRAIN
+    uniquement. Le bloc VALIDATION n'est jamais touche ici — c'est lui qui
+    sert a reconfirmer le top de ce classement, une seule fois.
+    """
+    from . import edge as edge_mod
+    from .backtest import split
+
+    adapter = build_adapter(cfg)
+    candles = _load_candles(cfg, adapter)
+    parts = split(candles, cfg)
+    train = parts["train"].candles
+    print(f"Bloc analyse : train ({parts['train'].eval_bars} bougies evaluees, "
+          f"validation et reserve non touches)\n")
+
+    horizons = (
+        tuple(int(h) for h in args.horizons.split(","))
+        if args.horizons
+        else edge_mod.DEFAULT_HORIZONS
+    )
+    data = edge_mod.explore_signals(cfg, train, horizons=horizons, permutations=args.permutations)
+    print(edge_mod.format_explore(data, top_k=args.top))
     return 0
 
 
@@ -560,7 +663,21 @@ def build_parser() -> argparse.ArgumentParser:
         help="decouper en N tranches chronologiques pour tester la stabilite "
              "de l'avantage dans le temps (exige --signal et un seul --horizons)",
     )
+    ed.add_argument(
+        "--explo", action="store_true",
+        help="chercher --signal dans la bibliotheque exploratoire (bot/signals_explo.py, "
+             "40 candidats) plutot que dans la liste figee de bot/signals.py",
+    )
     ed.set_defaults(func=cmd_edge)
+
+    ex = sub.add_parser(
+        "explore",
+        help="depistage de 40 signaux exploratoires (TA-Lib/pandas-ta/WorldQuant) sur le bloc train",
+    )
+    ex.add_argument("--horizons", help="horizons en bougies, separes par des virgules")
+    ex.add_argument("--permutations", type=int, default=2000)
+    ex.add_argument("--top", type=int, default=5, help="taille du classement a reconfirmer sur validation")
+    ex.set_defaults(func=cmd_explore)
 
     pl = sub.add_parser(
         "pooled", help="test d'avantage transversal sur tout l'univers de paires"
@@ -573,9 +690,21 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser(
         "tick", help="passage horaire : decide et journalise, sans rapport"
     ).set_defaults(func=cmd_tick)
-    sub.add_parser(
-        "forward-status", help="etat du journal de forward testing"
-    ).set_defaults(func=cmd_forward_status)
+
+    fs = sub.add_parser("forward-status", help="etat du journal de forward testing")
+    fs.add_argument(
+        "--since",
+        help="ne compter que depuis cette date/heure locale (AAAA-MM-JJ ou "
+             "AAAA-MM-JJTHH:MM), ex: --since 2026-09-03 pour 'depuis hier matin'",
+    )
+    fs.set_defaults(func=cmd_forward_status)
+
+    fr = sub.add_parser(
+        "forward-report",
+        help="page HTML : courbe du P&L reellement realise en direct (pas le backtest rejoue)",
+    )
+    fr.add_argument("--since", help="meme format que forward-status --since")
+    fr.set_defaults(func=cmd_forward_report)
 
     dl = sub.add_parser("daily", help="execution du jour et rapport du soir")
     dl.add_argument("--day", help="journee a rapporter (AAAA-MM-JJ), par defaut la derniere")

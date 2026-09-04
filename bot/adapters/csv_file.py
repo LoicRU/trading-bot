@@ -4,18 +4,27 @@ Utile quand le courtier n'expose aucune API — le cas d'OANDA TMS, qui ne
 propose que MetaTrader 5 — quand l'API de l'exchange est bloquee, ou pour
 exploiter une source d'historique profond.
 
-Trois formats reconnus automatiquement
----------------------------------------
+Quatre formats reconnus automatiquement
+----------------------------------------
 1. Simple, avec en-tete : ts,open,high,low,close,volume
    ts en millisecondes UTC, en secondes, ou en date ISO.
 
-2. Export MetaTrader 5, reconnu a son en-tete entre chevrons :
+2. Export MetaTrader 5 (terminal), reconnu a son en-tete entre chevrons :
    <DATE>\t<TIME>\t<OPEN>\t<HIGH>\t<LOW>\t<CLOSE>\t<TICKVOL>\t<VOL>\t<SPREAD>
 
 3. HistData « Generic ASCII », sans en-tete, separe par des points-virgules :
    20240102 000000;1.104370;1.104510;1.104110;1.104390;0
-   Attention : ces donnees sont horodatees en EST sans heure d'ete, donc
-   UTC-5 toute l'annee. D'ou le reglage market.csv_tz_offset_hours.
+
+4. HistData « Data files: MetaTrader », sans en-tete, separe par des virgules,
+   date et heure dans des colonnes separees :
+   2024.01.01,17:00,1.104270,1.104290,1.104250,1.104290,0
+   (a ne pas confondre avec le format 2 : pas d'en-tete, pas de tabulations,
+   pas de secondes dans l'heure — c'est un export different de HistData, pas
+   du terminal MetaTrader lui-meme.)
+
+Les deux formats HistData (3 et 4) sont horodates en EST sans heure d'ete,
+donc UTC-5 toute l'annee (confirme par leur documentation officielle, memes
+termes pour les deux). D'ou le reglage market.csv_tz_offset_hours.
 
 Lecture en flux
 ---------------
@@ -45,6 +54,7 @@ from .base import MarketAdapter, MarketDataError, sanity_check
 Ligne = Tuple[int, float, float, float, float, float]
 
 _HISTDATA = re.compile(r"^\s*(\d{8})\s+(\d{6})\s*[;,]")
+_MT_CSV = re.compile(r"^\s*(\d{4})\.(\d{2})\.(\d{2}),(\d{2}):(\d{2}),")
 EXTENSIONS = (".csv", ".txt")
 
 
@@ -115,6 +125,11 @@ def est_histdata(premiere_ligne: str) -> bool:
     return bool(_HISTDATA.match(premiere_ligne))
 
 
+def est_mt_csv(premiere_ligne: str) -> bool:
+    """HistData « Data files: MetaTrader » : 2024.01.01,17:00,1.1,1.2,1.0,1.15,0"""
+    return bool(_MT_CSV.match(premiere_ligne))
+
+
 # ----------------------------------------------------------------------
 # Lecteurs en flux
 # ----------------------------------------------------------------------
@@ -172,6 +187,32 @@ def _lignes_histdata(chemin: Path) -> Iterator[Ligne]:
                 continue
 
 
+def _parse_mt_csv_datetime(y: int, mo: int, d: int, h: int, mi: int) -> int:
+    jours = _jours_depuis_epoch(y, mo, d)
+    return (jours * 86400 + h * 3600 + mi * 60) * 1000
+
+
+def _lignes_mt_csv(chemin: Path) -> Iterator[Ligne]:
+    with chemin.open(encoding="utf-8-sig", newline="") as fh:
+        for ligne in fh:
+            m = _MT_CSV.match(ligne)
+            if not m:
+                continue
+            champs = ligne.rstrip("\r\n").split(",")
+            if len(champs) < 6:
+                continue
+            try:
+                y, mo, d, h, mi = (int(m.group(k)) for k in range(1, 6))
+                yield (
+                    _parse_mt_csv_datetime(y, mo, d, h, mi),
+                    float(champs[2]), float(champs[3]),
+                    float(champs[4]), float(champs[5]),
+                    float(champs[6]) if len(champs) > 6 and champs[6] else 0.0,
+                )
+            except (ValueError, IndexError):
+                continue
+
+
 def _lignes_simple(chemin: Path) -> Iterator[Ligne]:
     with chemin.open(newline="", encoding="utf-8-sig") as fh:
         reader = csv.DictReader(fh)
@@ -204,6 +245,8 @@ def lignes_du_fichier(chemin: Path) -> Iterator[Ligne]:
         return _lignes_mt5(chemin)
     if est_histdata(premiere):
         return _lignes_histdata(chemin)
+    if est_mt_csv(premiere):
+        return _lignes_mt_csv(chemin)
     return _lignes_simple(chemin)
 
 

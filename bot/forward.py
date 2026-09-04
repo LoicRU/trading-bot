@@ -256,14 +256,43 @@ class ForwardLog:
         }
 
     # ------------------------------------------------------------------
+    # Acces filtre (utilise par les stats et par le graphique de P&L)
+    # ------------------------------------------------------------------
+    def live_trades(self, since_ts: Optional[int] = None) -> List[Dict[str, Any]]:
+        """Trades reellement clotures en direct, tries par heure de sortie.
+
+        `since_ts` (millisecondes, meme unite que `exit_ts`) filtre sur
+        l'heure de marche du trade, pas sur l'heure a laquelle la ligne a ete
+        ecrite dans le journal : les deux coincident a l'heure pres puisque
+        le passage est horaire, mais c'est l'heure de marche qui est la
+        bonne reference pour decouper une fenetre ("depuis hier matin").
+        """
+        out = [rec for rec in self.read() if rec.get("type") == "trade"]
+        if since_ts is not None:
+            out = [rec for rec in out if int(rec["exit_ts"]) >= since_ts]
+        out.sort(key=lambda r: int(r["exit_ts"]))
+        return out
+
+    def live_decisions(self, since_ts: Optional[int] = None) -> List[Dict[str, Any]]:
+        out = [rec for rec in self.read() if rec.get("type") == "decision"]
+        if since_ts is not None:
+            out = [rec for rec in out if int(rec["ts"]) >= since_ts]
+        out.sort(key=lambda r: int(r["ts"]))
+        return out
+
+    # ------------------------------------------------------------------
     # Statistiques
     # ------------------------------------------------------------------
-    def stats(self) -> Dict[str, Any]:
-        live_decisions = 0
-        live_trades = 0
+    def stats(self, since_ts: Optional[int] = None) -> Dict[str, Any]:
+        """Bilan du journal en direct.
+
+        Sans `since_ts` : bilan complet, depuis la creation du journal.
+        Avec `since_ts` (millisecondes) : bilan restreint aux decisions et
+        trades dont l'heure de marche tombe a partir de ce moment - c'est
+        ce qui permet "les stats depuis hier matin" sans toucher au reste
+        du journal, qui reste en append seul.
+        """
         divergences = 0
-        first_live: Optional[str] = None
-        last_live: Optional[str] = None
         started_at: Optional[str] = None
 
         for rec in self.read():
@@ -271,20 +300,31 @@ class ForwardLog:
             if kind == "meta" and rec.get("event") == "journal_cree":
                 started_at = rec.get("recorded_at")
             elif kind == "divergence":
+                if since_ts is not None and int(rec.get("ts", 0)) < since_ts:
+                    continue
                 divergences += 1
-            elif kind == "decision":
-                live_decisions += 1
-                stamp = rec.get("recorded_at")
-                first_live = first_live or stamp
-                last_live = stamp
-            elif kind == "trade":
-                live_trades += 1
 
-        # La duree se compte depuis la creation du journal, pas depuis la
-        # premiere decision : un bot qui n'a rien decide pendant trois
-        # semaines a quand meme trois semaines de forward test.
+        decisions = self.live_decisions(since_ts)
+        trades = self.live_trades(since_ts)
+        first_live = decisions[0]["recorded_at"] if decisions else None
+        last_live = decisions[-1]["recorded_at"] if decisions else None
+        par_action: Dict[str, int] = {}
+        for d in decisions:
+            action = d.get("action", "?")
+            par_action[action] = par_action.get(action, 0) + 1
+        pnl_total = round(sum(float(t.get("pnl", 0.0)) for t in trades), 4)
+        gagnants = sum(1 for t in trades if float(t.get("pnl", 0.0)) > 0)
+        perdants = sum(1 for t in trades if float(t.get("pnl", 0.0)) < 0)
+
+        # La duree se compte depuis la creation du journal (ou depuis
+        # since_ts si on restreint la fenetre), pas depuis la premiere
+        # decision : un bot qui n'a rien decide pendant trois semaines a
+        # quand meme trois semaines de forward test.
         jours = 0.0
-        debut = started_at or first_live
+        if since_ts is not None:
+            debut = _iso(since_ts)
+        else:
+            debut = started_at or first_live
         if debut and last_live:
             try:
                 d0 = datetime.fromisoformat(debut)
@@ -294,10 +334,14 @@ class ForwardLog:
                 jours = 0.0
 
         return {
-            "decisions_live": live_decisions,
-            "trades_live": live_trades,
+            "decisions_live": len(decisions),
+            "trades_live": len(trades),
             "divergences": divergences,
             "debut_live": debut,
             "dernier_live": last_live,
             "jours_de_forward": jours,
+            "pnl_total": pnl_total,
+            "trades_gagnants": gagnants,
+            "trades_perdants": perdants,
+            "decisions_par_action": par_action,
         }

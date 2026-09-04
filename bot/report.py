@@ -20,6 +20,7 @@ from typing import List, Optional, Sequence, Tuple
 
 from .config import Config
 from .engine import RunResult
+from .forward import ForwardLog
 from .models import Action, Candle
 
 # --- Palette (validee : contraste et distinction daltonisme en clair et sombre)
@@ -99,9 +100,20 @@ def _downsample(points: Sequence[Tuple[int, float]], limit: int) -> List[Tuple[i
     return out
 
 
-def equity_chart(series: Sequence[Series], offset_hours: float, quote: str) -> str:
-    """Courbe d'equite : deux series sur UN SEUL axe (meme unite, meme capital
-    de depart), avec legende, etiquettes directes en bout de ligne et survol."""
+def equity_chart(
+    series: Sequence[Series],
+    offset_hours: float,
+    quote: str,
+    clamp_min_zero: bool = True,
+    aria_label: str = "Courbe d'equite du bot comparee a acheter et conserver",
+) -> str:
+    """Courbe generique a un seul axe Y (meme unite pour toutes les series),
+    avec legende, etiquettes directes en bout de ligne et survol.
+
+    `clamp_min_zero` : vrai pour une courbe de capital (qui ne descend
+    jamais sous zero) ; faux pour un P&L cumule, qui doit pouvoir montrer
+    une serie de pertes sans etre coupee au ras de l'axe.
+    """
     if not series or not series[0].points:
         return '<p class="empty">Pas encore assez de donnees pour tracer la courbe.</p>'
 
@@ -116,8 +128,11 @@ def equity_chart(series: Sequence[Series], offset_hours: float, quote: str) -> s
     if y_max == y_min:
         y_max = y_min + 1
     margin = (y_max - y_min) * 0.08
-    # Le capital ne peut pas etre negatif : on ne descend jamais l'axe sous zero.
-    y_min, y_max = max(0.0, y_min - margin), y_max + margin
+    y_min = y_min - margin
+    if clamp_min_zero:
+        # Le capital ne peut pas etre negatif : on ne descend jamais l'axe sous zero.
+        y_min = max(0.0, y_min)
+    y_max = y_max + margin
     x_span = max(x_max - x_min, 1)
 
     def sx(ts: int) -> float:
@@ -129,7 +144,7 @@ def equity_chart(series: Sequence[Series], offset_hours: float, quote: str) -> s
     parts: List[str] = []
     parts.append(
         f'<svg class="chart" viewBox="0 0 {W} {H}" role="img" '
-        f'aria-label="Courbe d\'equite du bot comparee a acheter et conserver" '
+        f'aria-label="{html.escape(aria_label)}" '
         f'preserveAspectRatio="xMidYMid meet">'
     )
 
@@ -589,6 +604,223 @@ def build_report(
     simule : ils ne tiennent pas compte de la liquidite reelle du carnet d'ordres
     ni de la latence d'execution, et ne constituent ni une preuve de rentabilite
     ni un conseil en investissement.
+  </footer>
+</div>
+</body>
+</html>
+"""
+
+
+def build_forward_report(
+    cfg: Config,
+    log: ForwardLog,
+    since_ts: Optional[int] = None,
+    since_label: Optional[str] = None,
+) -> str:
+    """Page HTML autonome : ce que le forward test EN DIRECT a reellement
+    gagne ou perdu, par opposition a la 'Courbe d'equite' du rapport du
+    soir qui rejoue tout l'historique et se termine toujours a aujourd'hui.
+
+    Construite uniquement a partir du journal append-seul de forward.py :
+    aucune valeur ici n'a pu etre calculee avec la connaissance du futur.
+    """
+    off = cfg.report.timezone_offset_hours
+    quote = quote_currency(cfg.market.symbol)
+    s = log.stats(since_ts=since_ts)
+    trades = log.live_trades(since_ts=since_ts)
+
+    # --- courbe de P&L cumule : part toujours de 0, pas d'un capital ----
+    points: List[Tuple[int, float]] = []
+    running = 0.0
+    for t in trades:
+        running += float(t.get("pnl", 0.0))
+        points.append((int(t["exit_ts"]), round(running, 4)))
+    pnl_series = Series(
+        "P&L cumule", points, SERIES_BOT_LIGHT, SERIES_BOT_DARK, "bot", "P&L"
+    )
+
+    tone = lambda v: "good" if v > 0 else ("bad" if v < 0 else "")  # noqa: E731
+
+    perimetre = f"depuis {since_label}" if since_label else "depuis le debut du journal"
+    stats_html = "".join([
+        _stat("P&L realise", f"{fmt_signed(s['pnl_total'])} {quote}", tone(s["pnl_total"]),
+              note=perimetre),
+        _stat("Trades clotures", str(s["trades_live"]),
+              note=f"{s['trades_gagnants']} gagnant(s) / {s['trades_perdants']} perdant(s)"),
+        _stat("Decisions en direct", str(s["decisions_live"]),
+              note="jamais recalculees apres coup"),
+        _stat("Duree de la fenetre", f"{fmt_num(s['jours_de_forward'], 1)} j",
+              note=f"depuis {s['debut_live'] or '-'}"),
+    ])
+    if s["divergences"]:
+        stats_html += _stat(
+            "Divergences", str(s["divergences"]), "bad",
+            note="forward test rompu sur cette fenetre",
+        )
+
+    trade_rows = [
+        [
+            fmt_time(int(t["entry_ts"]), off),
+            fmt_time(int(t["exit_ts"]), off),
+            fmt_num(float(t["entry_price"])),
+            fmt_num(float(t["exit_price"])),
+            f'<span class="{tone(float(t["pnl"]))}">{fmt_signed(float(t["pnl"]))}</span>',
+            f'<span class="{tone(float(t["r_multiple"]))}">{fmt_signed(float(t["r_multiple"]))} R</span>',
+            html.escape(str(t.get("exit_reason", ""))),
+        ]
+        for t in reversed(trades)
+    ]
+
+    generated = datetime.now(timezone(timedelta(hours=off))).strftime("%d/%m/%Y a %H:%M")
+    titre_fenetre = f" - {html.escape(since_label)}" if since_label else ""
+
+    warning = ""
+    if not trades:
+        warning = (
+            '<div class="alert">Aucun trade clôture pour l\'instant sur cette fenetre. '
+            "C'est attendu tant que le forward test vient de commencer : la courbe "
+            "apparaitra au fur et a mesure que des trades se cloturent reellement.</div>"
+        )
+
+    return f"""<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Forward test reel {html.escape(cfg.market.symbol)}{titre_fenetre}</title>
+<style>
+  :root {{
+    color-scheme: light;
+    --surface-1: #fcfcfb; --page: #f9f9f7;
+    --text-primary: #0b0b0b; --text-secondary: #52514e; --muted: #898781;
+    --grid: #e1e0d9; --axis: #c3c2b7; --border: rgba(11,11,11,.10);
+    --series-bot: {SERIES_BOT_LIGHT};
+    --good: #006300; --bad: #d03b3b; --warn-bg: #fff6e5; --warn-border: #fab219;
+  }}
+  @media (prefers-color-scheme: dark) {{
+    :root:not([data-theme="light"]) {{
+      color-scheme: dark;
+      --surface-1: #1a1a19; --page: #0d0d0d;
+      --text-primary: #ffffff; --text-secondary: #c3c2b7; --muted: #898781;
+      --grid: #2c2c2a; --axis: #383835; --border: rgba(255,255,255,.10);
+      --series-bot: {SERIES_BOT_DARK};
+      --good: #0ca30c; --bad: #e66767; --warn-bg: #2a2313; --warn-border: #fab219;
+    }}
+  }}
+  :root[data-theme="dark"] {{
+    color-scheme: dark;
+    --surface-1: #1a1a19; --page: #0d0d0d;
+    --text-primary: #ffffff; --text-secondary: #c3c2b7; --muted: #898781;
+    --grid: #2c2c2a; --axis: #383835; --border: rgba(255,255,255,.10);
+    --series-bot: {SERIES_BOT_DARK};
+    --good: #0ca30c; --bad: #e66767; --warn-bg: #2a2313; --warn-border: #fab219;
+  }}
+  * {{ box-sizing: border-box; }}
+  body {{
+    margin: 0; background: var(--page); color: var(--text-primary);
+    font: 14px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif;
+  }}
+  .wrap {{ max-width: 1000px; margin: 0 auto; padding: 28px 20px 64px; }}
+  header {{ margin-bottom: 22px; }}
+  h1 {{ font-size: 21px; margin: 0 0 4px; letter-spacing: -.01em; }}
+  .sub {{ color: var(--text-secondary); font-size: 13px; }}
+  .card {{
+    background: var(--surface-1); border: 1px solid var(--border);
+    border-radius: 10px; padding: 18px 20px; margin-bottom: 18px;
+  }}
+  h2 {{ font-size: 14px; margin: 0 0 14px; text-transform: uppercase;
+       letter-spacing: .06em; color: var(--text-secondary); font-weight: 600; }}
+  .stats {{ display: grid; background: var(--surface-1);
+            grid-template-columns: repeat(auto-fit, minmax(155px, 1fr));
+            border: 1px solid var(--border); border-radius: 10px; overflow: hidden;
+            margin-bottom: 18px; }}
+  .stat {{ padding: 14px 16px; border-right: 1px solid var(--border);
+           border-bottom: 1px solid var(--border); }}
+  .statlabel {{ font-size: 11px; text-transform: uppercase; letter-spacing: .06em;
+                color: var(--muted); margin-bottom: 5px; }}
+  .statvalue {{ font-size: 20px; font-weight: 600; letter-spacing: -.02em; }}
+  .statnote {{ font-size: 11.5px; color: var(--text-secondary); margin-top: 3px; }}
+  .good {{ color: var(--good); }}
+  .bad {{ color: var(--bad); }}
+  .chartwrap {{ position: relative; }}
+  .chart {{ width: 100%; height: auto; display: block; overflow: visible; }}
+  .grid {{ stroke: var(--grid); stroke-width: 1; }}
+  .axis {{ stroke: var(--axis); stroke-width: 1; }}
+  .tick {{ fill: var(--muted); font-size: 10.5px; font-variant-numeric: tabular-nums; }}
+  .line {{ fill: none; stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }}
+  .line-bot {{ stroke: var(--series-bot); }}
+  .endlabel {{ font-size: 11px; font-weight: 600; fill: var(--text-secondary); }}
+  .crosshair {{ stroke: var(--axis); stroke-width: 1; stroke-dasharray: 3 3; }}
+  .dot {{ stroke: var(--surface-1); stroke-width: 2; }}
+  .dot-bot {{ fill: var(--series-bot); }}
+  .legend {{ display: flex; gap: 18px; margin-bottom: 8px; font-size: 12.5px;
+             color: var(--text-secondary); }}
+  .legend-item {{ display: inline-flex; align-items: center; gap: 7px; }}
+  .swatch {{ width: 10px; height: 10px; border-radius: 3px; display: inline-block; }}
+  .sw-bot {{ background: var(--series-bot); }}
+  .tooltip {{
+    position: absolute; pointer-events: none; opacity: 0; transition: opacity .1s;
+    background: var(--surface-1); border: 1px solid var(--border); border-radius: 8px;
+    padding: 8px 10px; font-size: 12px; min-width: 180px;
+    box-shadow: 0 4px 14px rgba(0,0,0,.12);
+  }}
+  .tipdate {{ color: var(--muted); font-size: 11px; margin-bottom: 5px; }}
+  .tiprow {{ display: flex; align-items: center; gap: 7px; }}
+  .tiplabel {{ color: var(--text-secondary); }}
+  .tipval {{ margin-left: auto; font-variant-numeric: tabular-nums; font-weight: 600; }}
+  .tablewrap {{ overflow-x: auto; }}
+  table {{ border-collapse: collapse; width: 100%; font-size: 13px; }}
+  th {{ text-align: left; font-weight: 600; color: var(--text-secondary);
+        font-size: 11px; text-transform: uppercase; letter-spacing: .05em;
+        padding: 6px 10px 6px 0; border-bottom: 1px solid var(--border); white-space: nowrap; }}
+  td {{ padding: 7px 10px 7px 0; border-bottom: 1px solid var(--border);
+        vertical-align: top; font-variant-numeric: tabular-nums; white-space: nowrap; }}
+  td:last-child {{ font-variant-numeric: normal; color: var(--text-secondary);
+                   white-space: normal; }}
+  .empty {{ color: var(--muted); font-style: italic; margin: 0; }}
+  .note {{ color: var(--muted); font-size: 12px; }}
+  .alert {{ background: var(--warn-bg); border-left: 3px solid var(--warn-border);
+            padding: 10px 14px; border-radius: 6px; margin-bottom: 18px; font-size: 13px; }}
+  footer {{ color: var(--muted); font-size: 12px; margin-top: 26px;
+            border-top: 1px solid var(--border); padding-top: 14px; }}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>{html.escape(cfg.market.symbol)} - forward test reel{titre_fenetre}</h1>
+    <div class="sub">
+      Portefeuille fictif - construit uniquement a partir du journal en direct
+      (jamais du backtest rejoue) - genere le {generated}
+    </div>
+  </header>
+
+  {warning}
+
+  <div class="stats">{stats_html}</div>
+
+  <div class="card">
+    <h2>P&amp;L cumule (trades reellement clotures en direct)</h2>
+    {equity_chart(
+        [pnl_series], off, quote, clamp_min_zero=False,
+        aria_label="P&L cumule reellement realise en forward testing",
+    )}
+  </div>
+
+  <div class="card">
+    <h2>Trades du journal en direct</h2>
+    {_table(
+        ["Entree", "Sortie", "Prix entree", "Prix sortie", "Resultat", "R", "Motif de sortie"],
+        trade_rows,
+        "Aucun trade cloture pour l'instant.",
+    )}
+  </div>
+
+  <footer>
+    Ce rapport ne reflete que ce qui est ecrit dans le journal append-seul
+    de forward testing : aucune ligne n'a pu etre calculee avec la
+    connaissance du futur. Portefeuille simule, aucun argent reel engage,
+    aucun ordre reel passe.
   </footer>
 </div>
 </body>

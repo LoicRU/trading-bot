@@ -240,6 +240,98 @@ def compare_signals(
     return {"rapports": rapports, "n_tests": n_tests, "seuil_corrige": seuil}
 
 
+def explore_signals(
+    cfg: Config,
+    candles: Sequence[Candle],
+    horizons: Sequence[int] = DEFAULT_HORIZONS,
+    permutations: int = PERMUTATIONS,
+    seed: int = 424242,
+) -> Dict[str, object]:
+    """Etape 1 du protocole en deux temps : depistage de la bibliotheque
+    EXPLORATOIRE (bot/signals_explo.py), sur le bloc fourni en argument
+    UNIQUEMENT (l'appelant doit passer le bloc train, jamais validation ni
+    holdout — cette fonction ne le verifie pas elle-meme, cmd_explore le
+    garantit cote CLI).
+
+    Ne rend AUCUN verdict de type RETENU/rien : ce n'est pas
+    compare_signals. Le role de cette fonction est de classer, pas de
+    trancher — le tri sert a choisir 3 a 5 candidats a reconfirmer sur le
+    bloc validation, pas a conclure quoi que ce soit ici.
+    """
+    from .signals_explo import build_all_explo
+
+    signaux = build_all_explo()
+    rapports = [
+        analyse_signal(cfg, candles, s, horizons, permutations, seed + k)
+        for k, s in enumerate(signaux)
+    ]
+    n_tests = sum(len(r["results"]) for r in rapports)  # type: ignore[arg-type]
+    seuil = 0.05 / n_tests if n_tests else 0.05
+    return {"rapports": rapports, "n_tests": n_tests, "seuil_corrige": seuil}
+
+
+def format_explore(data: Dict[str, object], top_k: int = 5) -> str:
+    rapports = data["rapports"]  # type: ignore[assignment]
+    seuil = data["seuil_corrige"]  # type: ignore[assignment]
+    n_tests = data["n_tests"]
+
+    lines = [
+        "=" * 78,
+        "DEPISTAGE EXPLORATOIRE — bloc TRAIN uniquement, bloc VALIDATION intact",
+        "=" * 78,
+        "",
+        f"{len(rapports)} candidats x jusqu'a {len(DEFAULT_HORIZONS)} horizons = "
+        f"{n_tests} tests. Seuil corrige de Bonferroni sur ce lot : p < {seuil:.6f}.",
+        "",
+        "Ce tableau CLASSE, il ne CONCLUT pas. Avec ce nombre de tests, meme",
+        "un p brut < 0.001 peut etre du hasard. Ne construis rien sur ce",
+        "resultat seul : l'etape suivante, obligatoire, est de reconfirmer",
+        "les meilleurs candidats sur le bloc VALIDATION (jamais vu ici) avec :",
+        "    python -m bot.cli edge --signal <cle> --explo --segment validation",
+        "",
+        f"{'signal':>28} {'categorie':>18} {'n':>5} {'meilleur horizon':>18} "
+        f"{'ecart':>10} {'p':>8}",
+        "-" * 96,
+    ]
+
+    scored = []
+    for rap in rapports:
+        spec = rap["signal"]
+        res = rap["results"]
+        if not res:
+            lines.append(f"{spec.key:>28} {getattr(spec, 'categorie', ''):>18} "
+                          f"{rap['total_signals']:>5}  pas assez de signaux")
+            continue
+        best = min(res, key=lambda r: r.p_value)
+        scored.append((spec, best, rap["total_signals"]))
+        lines.append(
+            f"{spec.key:>28} {getattr(spec, 'categorie', ''):>18} {rap['total_signals']:>5} "
+            f"{str(best.horizon) + 'h':>18} {best.edge:>+10.3%} {best.p_value:>8.4f}"
+        )
+
+    scored.sort(key=lambda t: t[1].p_value)
+    lines.append("")
+    lines.append(f"TOP {top_k} — candidats a reconfirmer sur validation (dans cet ordre) :")
+    for rang, (spec, best, n) in enumerate(scored[:top_k], 1):
+        marque = "significatif brut (p<0.05)" if best.p_value < 0.05 else "pas meme significatif au seuil brut"
+        lines.append(
+            f"  {rang}. {spec.key:<28} p={best.p_value:.4f} ({marque}), "
+            f"ecart {best.edge:+.3%} a {best.horizon}h, n={n}"
+        )
+        if getattr(spec, "correle_avec", ""):
+            lines.append(f"     correle avec : {spec.correle_avec}")
+
+    lines += [
+        "",
+        "Rappel : sur un lot de cette taille, il est ATTENDU qu'au moins un",
+        "candidat sorte 'significatif' au seuil brut par pur hasard, meme si",
+        "rien ici ne vaut quoi que ce soit. Seule la confirmation sur",
+        "validation, avec un seuil corrige de la taille du top retenu (pas de",
+        "40), permet de trancher.",
+    ]
+    return "\n".join(lines)
+
+
 def format_report(data: Dict[str, object]) -> str:
     results: List[HorizonResult] = data["results"]  # type: ignore[assignment]
     lines = [

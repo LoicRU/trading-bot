@@ -110,6 +110,36 @@ python3 -m bot.cli backtest --use-holdout   # quand la stratégie est figée
 
 ---
 
+## Bibliothèque exploratoire de signaux (`bot/signals_explo.py`)
+
+En plus de la liste figée de 5 signaux de prix + 2 signaux de financement
+(`bot/signals.py`, testée méthodiquement dans ce projet), une bibliothèque
+**exploratoire** de 40 signaux supplémentaires — construits à partir de
+recherches sur TA-Lib, pandas-ta et la taxonomie des 101 alphas WorldQuant —
+est disponible pour un dépistage plus large. Le catalogue complet (105
+candidats recensés, 40 codés, 65 documentés pour un futur lot) est dans
+[`catalogue_signaux.md`](catalogue_signaux.md).
+
+Le protocole reste **en deux temps**, pour la même raison que le découpage
+train/validation/holdout ci-dessus : tester 40 signaux d'un coup sans
+correction ferait ressortir des faux positifs par pur hasard.
+
+```bash
+# Étape 1 — dépistage sur le bloc train uniquement (validation intacte)
+python3 -m bot.cli explore
+
+# Étape 2 — confirmation d'un candidat du top, UNE SEULE FOIS, sur validation
+python3 -m bot.cli edge --signal <cle> --explo --segment validation
+```
+
+`explore` calcule lui-même le seuil de Bonferroni corrigé pour l'ensemble du
+lot (~0.0003 avec 40 signaux × 5 horizons), classe les candidats, et propose
+un top 5 à reconfirmer. La confirmation utilise le seuil corrigé de la
+taille du top retenu, pas des 40 candidats de départ — c'est le dépistage qui
+absorbe le coût statistique d'avoir cherché large.
+
+---
+
 ## Gestion du risque
 
 - **Taille calculée depuis le risque, pas depuis un montant fixe** : on décide
@@ -247,7 +277,7 @@ le lancement plutôt que de produire un backtest faux.
 python3 -m unittest discover -s tests -t .
 ```
 
-53 tests. Le plus important est `test_aucune_fuite_du_futur` : il rejoue deux
+148 tests. Le plus important est `test_aucune_fuite_du_futur` : il rejoue deux
 marchés identiques jusqu'à une bougie donnée puis radicalement différents
 ensuite, et vérifie que **toutes les décisions passées sont rigoureusement
 identiques**. Un bot qui échoue à ce test peut afficher n'importe quelle
